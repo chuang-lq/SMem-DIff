@@ -1,0 +1,135 @@
+import os
+import random
+from os.path import join
+
+import cv2
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+
+from .data_sampler import EnlargedSampler
+from .utils import Crop, Flip, Rotate, ToTensor, normalize
+
+
+class DeblurDataset(Dataset):
+    """
+    Structure of self_.records:
+        seq:
+            frame:
+                path of images -> {'Blur': <path>, 'Sharp': <path>}
+    """
+
+    def __init__(self, path, frames, ds_type, crop_size=(256, 256), centralize=True, normalize=True):
+
+        # assert frames - future_frames - past_frames >= 1
+        # self.num_ff = future_frames
+        # self.num_pf = past_frames
+        self.frames = frames
+        self.H = 720
+        self.W = 1280
+        self.crop_h, self.crop_w = crop_size
+        self.normalize = normalize
+        self.centralize = centralize
+        if ds_type == 'train':
+            self.transform = transforms.Compose([Crop(crop_size), Flip(), Rotate(), ToTensor()])
+        elif ds_type == 'valid':
+            self.transform = transforms.Compose([Crop(crop_size), ToTensor()])
+        else:
+            raise ValueError("Wrong ds_type")
+        # self._seq_length = 100
+        self._samples = self._generate_samples(path)
+
+    def _generate_samples(self, dataset_path):
+        samples = list()
+        records = dict()
+        seqs = sorted(os.listdir(dataset_path))
+        for seq in seqs:
+            records[seq] = list()
+            seq_path = join(dataset_path, seq, 'GT')
+            imgs = [x for x in sorted(os.listdir(seq_path))]
+            for img in imgs:
+                suffix = 'jpg'
+                sample = dict()
+                sample['Blur'] = join(dataset_path, seq, 'input', img)
+                sample['Sharp'] = join(dataset_path, seq, 'GT', img)
+                records[seq].append(sample)
+        for seq_records in records.values():
+            temp_length = len(seq_records) - (self.frames - 1)
+            if temp_length <= 0:
+                raise IndexError('Exceed the maximum length of the video sequence')
+            for idx in range(temp_length):
+                samples.append(seq_records[idx:idx + self.frames])
+        return samples
+
+    def __getitem__(self, item):
+        top = random.randint(0, self.H - self.crop_h)
+        left = random.randint(0, self.W - self.crop_w)
+        flip_lr_flag = random.randint(0, 1)
+        rotate_flag = random.randint(0, 1)
+        sample = {'top': top, 'left': left, 'flip_lr': flip_lr_flag, 'rotate': rotate_flag}
+
+        blur_imgs, sharp_imgs = [], []
+        for sample_dict in self._samples[item]:
+            blur_img, sharp_img = self._load_sample(sample_dict, sample)
+            blur_imgs.append(blur_img)
+            sharp_imgs.append(sharp_img)
+        # sharp_imgs = sharp_imgs[self.num_pf:self.frames - self.num_ff]
+        return [torch.cat(item, dim=0) for item in [blur_imgs, sharp_imgs]]
+
+    def _load_sample(self, sample_dict, sample):
+        sample['image'] = cv2.imread(sample_dict['Blur'])
+        sample['label'] = cv2.imread(sample_dict['Sharp'])
+        sample = self.transform(sample)
+        val_range = 2.0 ** 8 - 1
+        blur_img = normalize(sample['image'], centralize=self.centralize, normalize=self.normalize, val_range=val_range)
+        sharp_img = normalize(sample['label'], centralize=self.centralize, normalize=self.normalize, val_range=val_range)
+
+        return blur_img, sharp_img
+
+    def __len__(self):
+        return len(self._samples)
+
+
+class Dataloader:
+    def __init__(self, para, device_id, ds_type='train'):
+        path = join(para.data_root, para.dataset, ds_type)
+        dataset = DeblurDataset(path, para.frames, ds_type, para.patch_size, para.centralize, para.normalize)
+
+        gpus = para.num_gpus
+        bs = para.batch_size
+        ds_len = len(dataset)
+        if para.trainer_mode == 'ddp':
+            sampler = torch.utils.data.distributed.DistributedSampler(
+                dataset,
+                num_replicas=gpus,
+                rank=device_id
+            )
+            self.loader = DataLoader(
+                dataset=dataset,
+                batch_size=para.batch_size,  # batch_size_per_node
+                shuffle=False,
+                num_workers=para.threads,
+                pin_memory=True,
+                sampler=sampler,
+                drop_last=True
+            )
+            loader_len = np.ceil(ds_len / gpus)
+            self.loader_len = int(np.ceil(loader_len / bs) * bs)
+
+        elif para.trainer_mode == 'dp':
+            self.loader = DataLoader(
+                dataset=dataset,
+                batch_size=para.batch_size,
+                shuffle=True,
+                num_workers=para.threads,
+                pin_memory=True,
+                drop_last=True
+            )
+            self.loader_len = int(np.ceil(ds_len / bs) * bs)
+
+    def __iter__(self):
+        return iter(self.loader)
+
+    def __len__(self):
+        return self.loader_len

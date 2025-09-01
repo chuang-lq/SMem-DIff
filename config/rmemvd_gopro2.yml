@@ -1,0 +1,72 @@
+# experiment mark
+description: develop # experiment description
+save_dir: experiment
+
+# global parameters
+seed: 42 # random seed
+threads: 0 # number of threads for dataloader
+num_gpus: 1 # number of GPUs to use
+no_profile: true # show the number of parameters and computation cost
+profile_H: !!int 720 # height of image to generate profile of model
+profile_W: !!int 1280 # width of image to generate profile of model
+resume: false
+resume_file: experiment/xmemvd_gopro/2024_11_24_17_14_06/checkpoint.pth.tar
+
+# data parameters
+data_root: ./dataset/  # the root path of dataset
+data_loader: DVD  # data load file: gopro_lmdb/GOPRO/DVD/BSD
+dataset: DVD  # dataset name: gopro_ori/gopro_ds/GOPRO/DVD/BSD
+ds_config: 1ms8ms  # 1ms8ms, 2ms16ms or 3ms24ms
+frames: !!int 8  # Training length
+data_format: RGB
+patch_size: [256, 256]
+# dataset_enlarge_ratio: 200
+
+# model parameters
+model: rmemvd-diff2  # model name: rmemvd/rmemvd-diff
+mid_channels: 64
+mem_every: 8
+num_blocks_forward: 15  # 7, 15, 30
+num_blocks_backward: 15
+# deep_update_every: 5
+
+diffusion_schedule:
+  schedule: linear
+  timesteps: 8  # 4, 6, 8
+  linear_start: 0.1  # 1e-6
+  linear_end: 0.99  # 1e-2
+
+# loss parameters
+loss: 1*L1_Charbonnier_loss|1*Diff_loss # type of loss function, e.g. 1*L1_Charbonnier_loss|1*Diff_loss
+
+# metrics parameters
+metrics: PSNR # type of evaluation metrics
+
+# optimizer parameters
+optimizer: AdamW  # method of optimization: Adam/AdamW
+lr: !!float 1e-4  # initial learning rate
+weight_decay: !!float 5e-5  # !!float 5e-5
+betas: [0.9, 0.999]
+lr_scheduler: cosine  # learning rate adjustment strategy
+batch_size: 1
+milestones: [200, 350, 450, 500]
+decay_gamma: 0.5  # decay rate
+
+# training parameters
+start_epoch: 1  # first epoch number
+end_epoch: 250  # last epoch number
+trainer_mode: dp  # trainer mode: distributed data parallel (ddp) or data parallel (dp)
+
+# valid parameters
+test_only: false # only do valid. Set false if you want to train the model
+crop_size: 256
+test_frames: 16 # -1 means that the model takes all frames as input and output them.
+                # Otherwise the model splits the video into several segments of length "test_frame" and then restores each segment separately.
+                # If GPU memory is small, please reduce this value
+test_save_img: true # If true, write the output images to the disk
+test_save_dir: results
+test_checkpoint: checkpoints/checkpoint.pth.tar  # checkpoints/checkpoint.pth.tar or checkpoints/model_best.pth.tar
+video: false # if true, generate video results
+
+normalize: true
+centralize: true
